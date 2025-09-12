@@ -1,0 +1,73 @@
+name: Build & publish ICS daily
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Mask secrets in logs
+        run: |
+          echo "::add-mask::${{ secrets.MASTER_URL }}"
+          echo "::add-mask::${{ secrets.PUBLISH_SLUG }}"
+          echo "::add-mask::${{ secrets.DOCS_JSON }}"
+
+      - name: Run script
+        env:
+          MASTER_URL: ${{ secrets.MASTER_URL }}
+          PUBLISH_SLUG: ${{ secrets.PUBLISH_SLUG }}
+          DOCS_JSON: ${{ secrets.DOCS_JSON }}
+        run: python script.py
+
+      - name: Upload master ICS as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-ics
+          path: artifacts/master.ics
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload env as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-json
+          path: artifacts/env.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload Pages artifact (split ICS in ./public)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
