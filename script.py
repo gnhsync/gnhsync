@@ -95,10 +95,11 @@ for uid, l in recurrence_info.items():
     assert not d
 
 doc_cals = {d: icalendar.Calendar() for d in docs}
-for c in doc_cals.values():
+for d, c in doc_cals.items():
     c.add("prodid", "-//shifts//")
     c.add("version", "2.0")
     c.add("x-wr-timezone", xwr)
+    c.add("x-wr-calname", "GNH " + d)
     for vtz in timezones: c.add_component(vtz)
 
 for ev in expanded_instances:
@@ -115,7 +116,7 @@ for ev in expanded_instances:
         if title_norm.startswith(d):
             if isinstance(dt, datetime.datetime):
                 tstr = dt.strftime("%-I:%M %p")
-                nev["SUMMARY"] = f"{tstr} GNH ED - {title}"
+                nev["SUMMARY"] = f"{tstr} GNH {title}"
 
                 day = dt.date()
                 nev.DTSTART = day
