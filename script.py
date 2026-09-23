@@ -25,15 +25,21 @@ def occurrence_key(value):
     return value
 
 
-# Retry inconsistent Edmonton series with the earlier recurrence rules.
-# Actual timestamps always retain the current timezone interpretation.
-FALLBACK_TZFILES = {
+# Compatibility policy for the observed source schedule and calendar UI.
+# Decode exported timestamps with current data, then convert by instant.
+CALENDAR_TZFILES = {
     "America/Edmonton": ".recurrence-tzdata/tzdata/zoneinfo/America/Edmonton",
 }
-fallback_timezones = {}
-for name, filename in FALLBACK_TZFILES.items():
+# Existing GNH masters are assumed to retain the earlier Edmonton rules.
+# New masters can use newer rules, so stop for review before applying this
+# policy to them. Keep this baseline fixed; do not replace it with now().
+MASTER_CREATED_CUTOFF = datetime.datetime(
+    2026, 9, 23, 5, 20, 42, tzinfo=datetime.timezone.utc
+)
+calendar_timezones = {}
+for name, filename in CALENDAR_TZFILES.items():
     with (Path(__file__).parent / filename).open("rb") as timezone_file:
-        fallback_timezones[name] = zoneinfo.ZoneInfo.from_file(timezone_file, key=name)
+        calendar_timezones[name] = zoneinfo.ZoneInfo.from_file(timezone_file, key=name)
 
 docs = json.loads(os.environ["DOCS_JSON"])
 
@@ -72,6 +78,13 @@ for comp in cal.walk("VEVENT"):
         assert recurid not in d
         d[recurid] = comp
     else:
+        created = comp.decoded("CREATED")
+        if created > MASTER_CREATED_CUTOFF:
+            raise ValueError(
+                f"Master {uid.decode()} created at {created.isoformat()} is newer than "
+                f"the verified cutoff {MASTER_CREATED_CUTOFF.isoformat()}; "
+                "review its timezone rules before applying the earlier-rule policy."
+            )
         assert recurrence_info[uid][0] is None
         recurrence_info[uid][0] = comp
 
@@ -89,34 +102,19 @@ for uid, l in recurrence_info.items():
             continue
         assert len(master.rrules) == 1
         rrule_prop = master.rrules[0]
-        candidates = [("current", dtstart_master.tzinfo)]
-        fallback = fallback_timezones.get(str(master["DTSTART"].params.get("TZID")))
-        if fallback is not None:
-            candidates.append(("legacy recurrence", fallback))
-
-        failures = []
-        for policy, rule_timezone in candidates:
-            rule_start = dtstart_master.astimezone(rule_timezone)
-            rule = dateutil.rrule.rrulestr(
-                rrule_prop.to_ical().decode(), dtstart=rule_start,
-            )
-            first = next(iter(rule), None)
-            start_matches = first is None or first == rule_start
-            rs = dateutil.rrule.rruleset()
-            rs.rrule(rule)
-            for exdate in master.exdates: rs.exdate(exdate)
-            occs = rs.between(rule_start, window_end, inc=True)
-            missing = set(d) - {occurrence_key(occ) for occ in occs}
-            if start_matches and not missing:
-                if policy != "current":
-                    print(f"Using legacy recurrence rules for {uid.decode()}")
-                break
-            failures.append(
-                f"{policy}: DTSTART matches RRULE={start_matches}; "
-                f"Unmatched recurrence IDs={sorted(missing)}"
-            )
-        else:
-            raise AssertionError(f"Cannot expand {uid.decode()}: {'; '.join(failures)}")
+        rule_timezone = calendar_timezones.get(
+            str(master["DTSTART"].params.get("TZID")), dtstart_master.tzinfo
+        )
+        rule_start = dtstart_master.astimezone(rule_timezone)
+        rule = dateutil.rrule.rrulestr(
+            rrule_prop.to_ical().decode(), dtstart=rule_start,
+        )
+        first = next(iter(rule), None)
+        assert first is None or first == rule_start, f"DTSTART does not match RRULE for {uid.decode()}"
+        rs = dateutil.rrule.rruleset()
+        rs.rrule(rule)
+        for exdate in master.exdates: rs.exdate(exdate)
+        occs = rs.between(rule_start, window_end, inc=True)
     else: occs = [dtstart_master]
 
     for occ_local in occs:
@@ -151,6 +149,8 @@ for d, c in doc_cals.items():
 
 for ev in expanded_instances:
     dt = ev.decoded("DTSTART")
+    if isinstance(dt, datetime.datetime):
+        dt = dt.astimezone(calendar_timezones.get(str(xwr), dt.tzinfo))
     title = ev.get("SUMMARY", "")
     title_norm = ''.join([
         c for c in unicodedata.normalize('NFKD', title.lower())
@@ -162,7 +162,7 @@ for ev in expanded_instances:
     # Serialize affected timed events as UTC; the abbreviated Google
     # VTIMEZONE does not describe historical winter offsets. Keep local
     # `dt` above for the existing doctor title/date conversion below.
-    if str(ev["DTSTART"].params.get("TZID")) in fallback_timezones:
+    if str(ev["DTSTART"].params.get("TZID")) in calendar_timezones:
         nev.DTSTART = occurrence_key(dt)
         nev.DTEND = occurrence_key(ev.decoded("DTEND"))
 
